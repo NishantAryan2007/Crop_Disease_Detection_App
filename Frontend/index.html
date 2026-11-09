@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PhytoScan AI</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="bg-glow"></div>
+
+    <div class="app-container">
+        <header>
+            <div class="badge">
+                <span class="dot"></span> Neural Diagnostic Engine v1.0
+            </div>
+            <h1>Phyto<span>Scan</span> AI</h1>
+            <p>Real-time deep learning leaf pathology & disease classification</p>
+        </header>
+
+        <div class="main-content" id="mainContent">
+            <!-- Left Side -->
+            <section class="left-panel">
+                <div class="mode-toggle">
+                    <button id="btnUploadMode" class="active" onclick="switchMode('upload')">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                        Upload File
+                    </button>
+                    <button id="btnCameraMode" onclick="switchMode('camera')">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                        Live Camera
+                    </button>
+                </div>
+
+                <div class="viewfinder" id="viewfinder">
+                    <input type="file" id="imageInput" accept="image/jpeg, image/png, image/jpg" onchange="handleFileUpload()">
+                    
+                    <!-- Layers that crossfade -->
+                    <div id="uploadUI" class="ui-layer active" onclick="document.getElementById('imageInput').click()">
+                        <div class="icon-circle">
+                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                        </div>
+                        <h3>Drop leaf image here</h3>
+                        <p>Supports JPG, JPEG, PNG</p>
+                        <button class="browse-btn">Browse Files</button>
+                    </div>
+
+                    <div id="cameraUI" class="ui-layer">
+                        <video id="webcam" autoplay playsinline></video>
+                        <button id="captureBtn" onclick="capturePhoto()">Snap Photo</button>
+                    </div>
+
+                    <img id="preview" class="ui-layer" alt="">
+                </div>
+                
+                <!-- Action Bar slides down smoothly -->
+                <div id="actionBar" class="action-bar">
+                    <button id="retakeBtn" class="secondary-btn" onclick="resetView()">Choose Another</button>
+                    <button id="scanBtn" class="primary-btn" onclick="runScan()">Run Neural Diagnostic </button>
+                </div>
+                
+                <div id="loader" class="loader-bar">
+                    <span class="spinner"></span> Processing...
+                </div>
+            </section>
+
+            <!-- Right Side Slides out from the left -->
+            <section id="resultsPanel" class="right-panel">
+                <div class="result-card">
+                    <div class="card-header-flex">
+                        <span class="status-badge">DIAGNOSIS COMPLETE</span>
+                        <span class="time">Just now</span>
+                    </div>
+                    
+                    <div class="detected-label">DETECTED PATHOLOGY</div>
+                    <div class="disease-name" id="rPathology">--</div>
+                    
+                    <div class="confidence-container">
+                        <div class="conf-labels">
+                            <span>Model Confidence</span>
+                            <span id="rConfText">0%</span>
+                        </div>
+                        <div class="progress-bar-bg">
+                            <div class="progress-bar-fill" id="rConfBar" style="width: 0%;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="extra-details">
+                        <div class="detail-row">
+                            <span>AI Classification</span>
+                            <span id="rClass">--</span>
+                        </div>
+                        <div class="detail-row">
+                            <span>Severity / Risk</span>
+                            <span id="rRisk">--</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+    <canvas id="canvas" style="display:none;"></canvas>
+    <script src="app.js"></script>
+</body>
+</html>
