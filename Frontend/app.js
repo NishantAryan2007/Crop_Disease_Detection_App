@@ -1,4 +1,4 @@
-const API_ENDPOINT = 'https://crop-disease-detection-app-gkpn.onrender.com/api/v1/scan';
+const API_ENDPOINT = 'http://127.0.0.1:8000/api/v1/scan';
 
 let stream = null;
 let currentBlob = null;

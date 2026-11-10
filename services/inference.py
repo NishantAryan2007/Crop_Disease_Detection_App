@@ -1,12 +1,26 @@
 import numpy as np
-import torch
+import onnxruntime as ort
 import tensorflow as tf
-from ultralytics import YOLO
+from PIL import ImageOps
 from utils.image_prep import load_pil_image, prepare_keras_tensor
 
-# 1. Load All Models Once on Server Startup
-print("Initializing ML Service: Loading Models into memory...")
-yolo_bouncer = YOLO("Models/yolov8n.pt")
+# Restrict thread pools to keep memory footprint flat
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
+
+# 1. Load All Models Once on Server Startup (~270 MB total RAM)
+print("Initializing ML Service: Loading ONNX & Keras Models into memory...")
+sess_options = ort.SessionOptions()
+sess_options.intra_op_num_threads = 1
+sess_options.inter_op_num_threads = 1
+
+yolo_session = ort.InferenceSession(
+    "Models/yolov8n.onnx",
+    sess_options=sess_options,
+    providers=["CPUExecutionProvider"]
+)
+yolo_input_name = yolo_session.get_inputs()[0].name
+
 identification_model = tf.keras.models.load_model("Models/weed_efficientnet.keras", compile=False)
 pathology_model = tf.keras.models.load_model("Models/soybean_pathology.keras", compile=False)
 
@@ -24,26 +38,36 @@ BLOCKED_PARASITES = {
 YOLO_CONF_THRESHOLD = 0.40
 
 
+def run_yolo_bouncer_onnx(pil_image) -> bool:
+    """Runs YOLOv8n via ONNX Runtime and returns True if a blocked parasite is detected."""
+    # Letterbox resize to 640x640 with standard YOLO grey padding (114, 114, 114)
+    padded_img = ImageOps.pad(pil_image.convert("RGB"), (640, 640), color=(114, 114, 114))
+    img_array = np.asarray(padded_img, dtype=np.float32) / 255.0
+    # Convert HWC (640, 640, 3) -> NCHW (1, 3, 640, 640)
+    input_tensor = np.transpose(img_array, (2, 0, 1))[np.newaxis, ...]
+
+    # Output shape is (1, 84, 8400): first 4 rows are box coords, remaining 80 rows are COCO class scores
+    outputs = yolo_session.run(None, {yolo_input_name: input_tensor})
+    class_scores = outputs[0][0][4:, :]
+
+    max_scores = np.max(class_scores, axis=0)
+    class_ids = np.argmax(class_scores, axis=0)
+    detected_classes = set(class_ids[max_scores >= YOLO_CONF_THRESHOLD].tolist())
+
+    return bool(detected_classes & BLOCKED_PARASITES)
+
+
 def run_diagnosis_pipeline(image_bytes: bytes) -> dict:
-    """Executes the full YOLO -> Plant ID -> Pathology pipeline."""
+    """Executes the full YOLO (ONNX) -> Plant ID -> Pathology pipeline."""
     pil_image = load_pil_image(image_bytes)
 
     # STAGE 1: The YOLO Bouncer
-    with torch.no_grad():
-        yolo_results = yolo_bouncer.predict(
-            pil_image,
-            conf=YOLO_CONF_THRESHOLD,
-            verbose=False
-        )
-
-    for box in yolo_results[0].boxes:
-        class_id = int(box.cls[0])
-        if class_id in BLOCKED_PARASITES:
-            return {
-                "status": "rejected",
-                "message": "Resource Parasite blocked. Human, animal, or non-plant object detected.",
-                "is_weed": False
-            }
+    if run_yolo_bouncer_onnx(pil_image):
+        return {
+            "status": "rejected",
+            "message": "Resource Parasite blocked. Human, animal, or non-plant object detected.",
+            "is_weed": False
+        }
 
     # STAGE 2: Preprocess for EfficientNet
     processed_tensor = prepare_keras_tensor(pil_image)
