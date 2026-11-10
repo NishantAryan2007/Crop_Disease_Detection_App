@@ -1,5 +1,8 @@
+const API_ENDPOINT = 'https://crop-disease-detection-app-gkpn.onrender.com/api/v1/scan';
+
 let stream = null;
 let currentBlob = null;
+let currentObjectUrl = null;
 let currentMode = 'upload';
 
 // Initialize Drag & Drop Listeners once DOM loads
@@ -25,7 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const file = e.dataTransfer.files[0];
         if (file && file.type.startsWith('image/')) {
             currentBlob = file;
-            showPreview(URL.createObjectURL(file));
+            showPreview(file);
         } else {
             alert("Please drop a valid JPG or PNG image.");
         }
@@ -38,8 +41,8 @@ async function switchMode(mode) {
     const btnCamera = document.getElementById('btnCameraMode');
     const uploadUI = document.getElementById('uploadUI');
     const cameraUI = document.getElementById('cameraUI');
-    
-    clearCurrentScan(); 
+
+    clearCurrentScan();
 
     if (mode === 'upload') {
         btnUpload.classList.add('active');
@@ -58,8 +61,15 @@ async function switchMode(mode) {
 
 function clearCurrentScan() {
     currentBlob = null;
+    if (currentObjectUrl) {
+        URL.revokeObjectURL(currentObjectUrl);
+        currentObjectUrl = null;
+    }
+    const preview = document.getElementById('preview');
+    preview.removeAttribute('src');
+    preview.classList.remove('active');
+
     document.getElementById('imageInput').value = '';
-    document.getElementById('preview').classList.remove('active');
     document.getElementById('actionBar').classList.remove('active');
     document.getElementById('mainContent').classList.remove('expanded');
     document.getElementById('rConfBar').style.width = '0%';
@@ -80,7 +90,9 @@ async function startCamera() {
     if (stream) stopCamera();
     const video = document.getElementById('webcam');
     try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment' }
+        });
         video.srcObject = stream;
     } catch (err) {
         alert("Camera unavailable or permission denied.");
@@ -89,27 +101,33 @@ async function startCamera() {
 }
 
 function stopCamera() {
-    if (stream) { 
-        stream.getTracks().forEach(track => track.stop()); 
-        stream = null; 
+    if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
     }
     const video = document.getElementById('webcam');
     if (video) {
-        video.srcObject = null; 
+        video.srcObject = null;
     }
 }
 
 function capturePhoto() {
     const video = document.getElementById('webcam');
+    if (!video.videoWidth || !video.videoHeight) {
+        alert("Camera is still initializing. Please wait a moment.");
+        return;
+    }
+
     const canvas = document.getElementById('canvas');
     const context = canvas.getContext('2d');
-    canvas.width = video.videoWidth; 
+    canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
+
     canvas.toBlob(blob => {
+        if (!blob) return;
         currentBlob = blob;
-        showPreview(URL.createObjectURL(blob));
+        showPreview(blob);
     }, 'image/jpeg', 0.9);
 }
 
@@ -117,19 +135,24 @@ function handleFileUpload() {
     const file = document.getElementById('imageInput').files[0];
     if (file) {
         currentBlob = file;
-        showPreview(URL.createObjectURL(file));
+        showPreview(file);
     }
 }
 
-function showPreview(url) {
+function showPreview(blobOrFile) {
+    if (currentObjectUrl) {
+        URL.revokeObjectURL(currentObjectUrl);
+    }
+    currentObjectUrl = URL.createObjectURL(blobOrFile);
+
     const preview = document.getElementById('preview');
-    preview.src = url;
-    
+    preview.src = currentObjectUrl;
+
     document.getElementById('uploadUI').classList.remove('active');
     document.getElementById('cameraUI').classList.remove('active');
     preview.classList.add('active');
     document.getElementById('actionBar').classList.add('active');
-    
+
     stopCamera();
 }
 
@@ -145,25 +168,31 @@ async function runScan() {
     const confBar = document.getElementById('rConfBar');
 
     btn.disabled = true;
-    loader.classList.add('active'); 
+    loader.classList.add('active');
     confBar.style.width = '0%';
 
     const formData = new FormData();
     formData.append('file', currentBlob, 'capture.jpg');
 
     try {
-        const response = await fetch('http://127.0.0.1:8000/api/v1/scan', {
+        const response = await fetch(API_ENDPOINT, {
             method: 'POST',
             body: formData
         });
-        
-        const json = await response.json();
+
+        const rawText = await response.text();
+        let json;
+        try {
+            json = JSON.parse(rawText);
+        } catch {
+            throw new Error(`Server returned status ${response.status}. It may still be waking up.`);
+        }
 
         if (!response.ok) {
             alert("API Error: " + (json.detail || JSON.stringify(json)));
             return;
         }
-        
+
         // 1. Handle YOLO Bouncer Rejection
         if (json.status === "rejected") {
             document.getElementById('rPathology').innerText = "Scan Terminated";
@@ -190,7 +219,7 @@ async function runScan() {
         riskEl.innerText = json.pathology_confidence + '%';
 
         resultCard.classList.remove('state-danger', 'state-warning');
-        
+
         if (json.plant_type === "Soil" || json.is_weed) {
             resultCard.classList.add('state-warning');
             statusBadge.innerText = json.plant_type === "Soil" ? 'SOIL SAMPLE' : 'NON-TARGET PLANT';
@@ -205,13 +234,13 @@ async function runScan() {
         }
 
         mainContent.classList.add('expanded');
-        
+
         setTimeout(() => {
             confBar.style.width = json.identification_confidence + '%';
         }, 600);
 
     } catch (err) {
-        alert("Server connection failed. Make sure FastAPI is running on port 8000.");
+        alert("Unable to reach the cloud inference server. If the server was asleep, wait 30 seconds and try scanning again.");
         console.error("Actual error details:", err);
     } finally {
         btn.disabled = false;
