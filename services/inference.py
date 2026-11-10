@@ -1,21 +1,20 @@
-import ctypes
-import gc
 import numpy as np
 import torch
 import tensorflow as tf
 from ultralytics import YOLO
 from utils.image_prep import load_pil_image, prepare_keras_tensor
 
-# Restrict CPU thread pools so PyTorch and TensorFlow don't allocate extra RAM arenas per core
-torch.set_num_threads(1)
-tf.config.threading.set_intra_op_parallelism_threads(1)
-tf.config.threading.set_inter_op_parallelism_threads(1)
+# 1. Load All Models Once on Server Startup
+print("Initializing ML Service: Loading Models into memory...")
+yolo_bouncer = YOLO("Models/yolov8n.pt")
+identification_model = tf.keras.models.load_model("Models/weed_efficientnet.keras", compile=False)
+pathology_model = tf.keras.models.load_model("Models/soybean_pathology.keras", compile=False)
 
-# Class Definitions
+# 2. Class Definitions
 IDENTIFICATION_CLASSES = ['Broadleaf', 'Grass', 'Soil', 'Soybean']
 PATHOLOGY_CLASSES = ['Bacterial_Viral', 'Fungal', 'Healthy']
 
-# Agricultural & Indoor Noise Blocklist (COCO Class IDs)
+# 3. Agricultural & Indoor Noise Blocklist (COCO Class IDs)
 BLOCKED_PARASITES = {
     0, 1, 2, 3, 7,
     14, 15, 16, 17, 18, 19,
@@ -25,35 +24,20 @@ BLOCKED_PARASITES = {
 YOLO_CONF_THRESHOLD = 0.40
 
 
-def release_ram():
-    """Clears TensorFlow C++ graph, runs Python GC, and forces Linux glibc to return RAM to the OS."""
-    tf.keras.backend.clear_session()
-    gc.collect()
-    try:
-        ctypes.CDLL("libc.so.6").malloc_trim(0)
-    except Exception:
-        pass
-
-
 def run_diagnosis_pipeline(image_bytes: bytes) -> dict:
-    """Executes the YOLO -> Plant ID -> Pathology pipeline sequentially (1 model in RAM at a time)."""
+    """Executes the full YOLO -> Plant ID -> Pathology pipeline."""
     pil_image = load_pil_image(image_bytes)
 
-    # STAGE 1: The YOLO Bouncer (Load -> Predict -> Unload)
-    bouncer = YOLO("Models/yolov8n.pt")
+    # STAGE 1: The YOLO Bouncer
     with torch.no_grad():
-        yolo_results = bouncer.predict(
+        yolo_results = yolo_bouncer.predict(
             pil_image,
             conf=YOLO_CONF_THRESHOLD,
             verbose=False
         )
-    detected_classes = [int(box.cls[0]) for box in yolo_results[0].boxes]
 
-    del yolo_results
-    del bouncer
-    release_ram()
-
-    for class_id in detected_classes:
+    for box in yolo_results[0].boxes:
+        class_id = int(box.cls[0])
         if class_id in BLOCKED_PARASITES:
             return {
                 "status": "rejected",
@@ -61,40 +45,21 @@ def run_diagnosis_pipeline(image_bytes: bytes) -> dict:
                 "is_weed": False
             }
 
-    # STAGE 2 & 3: Plant Identification (Load -> Predict -> Unload)
+    # STAGE 2: Preprocess for EfficientNet
     processed_tensor = prepare_keras_tensor(pil_image)
 
-    id_model = tf.keras.models.load_model(
-        "Models/weed_efficientnet.keras",
-        compile=False
-    )
-    id_predictions = id_model(processed_tensor, training=False).numpy()
+    # STAGE 3: Plant Identification
+    id_predictions = identification_model(processed_tensor, training=False).numpy()
     id_class_index = int(np.argmax(id_predictions[0]))
     plant_type = IDENTIFICATION_CLASSES[id_class_index]
     plant_confidence = float(id_predictions[0][id_class_index])
 
-    del id_predictions
-    del id_model
-    del processed_tensor
-    release_ram()
-
     # STAGE 4: Pathology Engine (Triggered strictly for Soybean)
     if plant_type == "Soybean":
-        processed_tensor = prepare_keras_tensor(pil_image)
-        path_model = tf.keras.models.load_model(
-            "Models/soybean_pathology.keras",
-            compile=False
-        )
-        disease_preds = path_model(processed_tensor, training=False).numpy()
+        disease_preds = pathology_model(processed_tensor, training=False).numpy()
         disease_index = int(np.argmax(disease_preds[0]))
         disease_type = PATHOLOGY_CLASSES[disease_index]
         disease_confidence = float(disease_preds[0][disease_index])
-
-        del disease_preds
-        del path_model
-        del processed_tensor
-        del pil_image
-        release_ram()
 
         return {
             "status": "success",
@@ -104,9 +69,6 @@ def run_diagnosis_pipeline(image_bytes: bytes) -> dict:
             "pathology_confidence": round(disease_confidence * 100, 2),
             "is_weed": False
         }
-
-    del pil_image
-    release_ram()
 
     # Non-Soybean Output (Broadleaf, Grass, or Soil)
     return {
