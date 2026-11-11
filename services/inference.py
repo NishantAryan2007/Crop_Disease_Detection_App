@@ -1,19 +1,17 @@
+import gc
 import numpy as np
 import onnxruntime as ort
-import tensorflow as tf
 from PIL import ImageOps
 from utils.image_prep import load_pil_image, prepare_keras_tensor
 
-# Restrict thread pools to keep memory footprint flat
-tf.config.threading.set_intra_op_parallelism_threads(1)
-tf.config.threading.set_inter_op_parallelism_threads(1)
-
-# 1. Load All Models Once on Server Startup (~270 MB total RAM)
-print("Initializing ML Service: Loading ONNX & Keras Models into memory...")
+# Configure ONNX Runtime to keep RAM usage strictly capped (~115 MB total)
 sess_options = ort.SessionOptions()
 sess_options.intra_op_num_threads = 1
 sess_options.inter_op_num_threads = 1
+sess_options.enable_cpu_mem_arena = False
+sess_options.enable_mem_pattern = False
 
+print("Initializing ML Service: Loading all 3 ONNX Models into memory...")
 yolo_session = ort.InferenceSession(
     "Models/yolov8n.onnx",
     sess_options=sess_options,
@@ -21,14 +19,25 @@ yolo_session = ort.InferenceSession(
 )
 yolo_input_name = yolo_session.get_inputs()[0].name
 
-identification_model = tf.keras.models.load_model("Models/weed_efficientnet.keras", compile=False)
-pathology_model = tf.keras.models.load_model("Models/soybean_pathology.keras", compile=False)
+id_session = ort.InferenceSession(
+    "Models/weed_efficientnet.onnx",
+    sess_options=sess_options,
+    providers=["CPUExecutionProvider"]
+)
+id_input_name = id_session.get_inputs()[0].name
 
-# 2. Class Definitions
+pathology_session = ort.InferenceSession(
+    "Models/soybean_pathology.onnx",
+    sess_options=sess_options,
+    providers=["CPUExecutionProvider"]
+)
+pathology_input_name = pathology_session.get_inputs()[0].name
+
+# Class Definitions
 IDENTIFICATION_CLASSES = ['Broadleaf', 'Grass', 'Soil', 'Soybean']
 PATHOLOGY_CLASSES = ['Bacterial_Viral', 'Fungal', 'Healthy']
 
-# 3. Agricultural & Indoor Noise Blocklist (COCO Class IDs)
+# Agricultural & Indoor Noise Blocklist (COCO Class IDs)
 BLOCKED_PARASITES = {
     0, 1, 2, 3, 7,
     14, 15, 16, 17, 18, 19,
@@ -40,13 +49,10 @@ YOLO_CONF_THRESHOLD = 0.40
 
 def run_yolo_bouncer_onnx(pil_image) -> bool:
     """Runs YOLOv8n via ONNX Runtime and returns True if a blocked parasite is detected."""
-    # Letterbox resize to 640x640 with standard YOLO grey padding (114, 114, 114)
     padded_img = ImageOps.pad(pil_image.convert("RGB"), (640, 640), color=(114, 114, 114))
     img_array = np.asarray(padded_img, dtype=np.float32) / 255.0
-    # Convert HWC (640, 640, 3) -> NCHW (1, 3, 640, 640)
     input_tensor = np.transpose(img_array, (2, 0, 1))[np.newaxis, ...]
 
-    # Output shape is (1, 84, 8400): first 4 rows are box coords, remaining 80 rows are COCO class scores
     outputs = yolo_session.run(None, {yolo_input_name: input_tensor})
     class_scores = outputs[0][0][4:, :]
 
@@ -58,11 +64,13 @@ def run_yolo_bouncer_onnx(pil_image) -> bool:
 
 
 def run_diagnosis_pipeline(image_bytes: bytes) -> dict:
-    """Executes the full YOLO (ONNX) -> Plant ID -> Pathology pipeline."""
+    """Executes the full YOLO -> Plant ID -> Pathology pipeline via ONNX Runtime."""
     pil_image = load_pil_image(image_bytes)
 
     # STAGE 1: The YOLO Bouncer
     if run_yolo_bouncer_onnx(pil_image):
+        del pil_image
+        gc.collect()
         return {
             "status": "rejected",
             "message": "Resource Parasite blocked. Human, animal, or non-plant object detected.",
@@ -71,19 +79,23 @@ def run_diagnosis_pipeline(image_bytes: bytes) -> dict:
 
     # STAGE 2: Preprocess for EfficientNet
     processed_tensor = prepare_keras_tensor(pil_image)
+    del pil_image
 
     # STAGE 3: Plant Identification
-    id_predictions = identification_model(processed_tensor, training=False).numpy()
+    id_predictions = id_session.run(None, {id_input_name: processed_tensor})[0]
     id_class_index = int(np.argmax(id_predictions[0]))
     plant_type = IDENTIFICATION_CLASSES[id_class_index]
     plant_confidence = float(id_predictions[0][id_class_index])
 
     # STAGE 4: Pathology Engine (Triggered strictly for Soybean)
     if plant_type == "Soybean":
-        disease_preds = pathology_model(processed_tensor, training=False).numpy()
+        disease_preds = pathology_session.run(None, {pathology_input_name: processed_tensor})[0]
         disease_index = int(np.argmax(disease_preds[0]))
         disease_type = PATHOLOGY_CLASSES[disease_index]
         disease_confidence = float(disease_preds[0][disease_index])
+
+        del processed_tensor
+        gc.collect()
 
         return {
             "status": "success",
@@ -93,6 +105,9 @@ def run_diagnosis_pipeline(image_bytes: bytes) -> dict:
             "pathology_confidence": round(disease_confidence * 100, 2),
             "is_weed": False
         }
+
+    del processed_tensor
+    gc.collect()
 
     # Non-Soybean Output (Broadleaf, Grass, or Soil)
     return {
