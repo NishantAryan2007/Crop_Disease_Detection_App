@@ -91,29 +91,33 @@ def run_diagnosis_pipeline(image_bytes: bytes) -> dict:
         del pil_image
 
         # STAGE 3: Plant Identification
-        id_predictions = id_session.run(None, {id_input_name: processed_tensor})[0]
-        id_class_index = int(np.argmax(id_predictions[0]))
+        id_predictions = id_session.run(None, {id_input_name: processed_tensor})[0][0]
+        id_class_index = int(np.argmax(id_predictions))
         plant_type = IDENTIFICATION_CLASSES[id_class_index]
-        plant_confidence = float(id_predictions[0][id_class_index])
+        plant_confidence = float(id_predictions[id_class_index])
+        soybean_prob = float(id_predictions[3])  # Index 3 is 'Soybean'
 
-        # STAGE 4: Pathology Engine (Triggered strictly for Soybean)
-        if plant_type == "Soybean":
-            disease_preds = pathology_session.run(None, {pathology_input_name: processed_tensor})[0]
-            disease_index = int(np.argmax(disease_preds[0]))
+        # STAGE 4: Pathology Engine
+        # Run if Soybean is #1, OR if classified as Broadleaf/Soil when Soybean has >=15% probability
+        if plant_type == "Soybean" or (plant_type in ["Broadleaf", "Soil"] and soybean_prob >= 0.15):
+            disease_preds = pathology_session.run(None, {pathology_input_name: processed_tensor})[0][0]
+            disease_index = int(np.argmax(disease_preds))
             disease_type = PATHOLOGY_CLASSES[disease_index]
-            disease_confidence = float(disease_preds[0][disease_index])
+            disease_confidence = float(disease_preds[disease_index])
 
-            del processed_tensor
-            force_ram_cleanup()
+            # Accept as Soybean if it was already #1, or if pathology strongly detects a disease (>=75%)
+            if plant_type == "Soybean" or (disease_type != "Healthy" and disease_confidence >= 0.75):
+                del processed_tensor
+                force_ram_cleanup()
 
-            return {
-                "status": "success",
-                "plant_type": plant_type,
-                "identification_confidence": round(plant_confidence * 100, 2),
-                "health_status": disease_type,
-                "pathology_confidence": round(disease_confidence * 100, 2),
-                "is_weed": False
-            }
+                return {
+                    "status": "success",
+                    "plant_type": "Soybean",
+                    "identification_confidence": round(max(plant_confidence, disease_confidence) * 100, 2),
+                    "health_status": disease_type,
+                    "pathology_confidence": round(disease_confidence * 100, 2),
+                    "is_weed": False
+                }
 
         del processed_tensor
         force_ram_cleanup()

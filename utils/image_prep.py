@@ -1,15 +1,20 @@
 import io
 import numpy as np
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
+
+TARGET_SIZE = (224, 224)
 
 
 def load_pil_image(image_bytes: bytes) -> Image.Image:
-    """Loads raw bytes into an RGB PIL Image."""
-    return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    """Safely converts raw request bytes into an RGB PIL Image."""
+    try:
+        return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except UnidentifiedImageError:
+        raise ValueError("Invalid image file. Please upload a valid JPG or PNG.")
 
 
 def prepare_keras_tensor(pil_image: Image.Image) -> np.ndarray:
-    """Resizes image to 224x224 and returns a float32 batch array (1, 224, 224, 3)."""
-    resized = pil_image.resize((224, 224), Image.Resampling.BILINEAR)
-    img_array = np.asarray(resized, dtype=np.float32)
-    return np.expand_dims(img_array, axis = 0)
+    """Resizes a PIL image using default Bicubic resampling into (1, 224, 224, 3)."""
+    resized_image = pil_image.resize(TARGET_SIZE)
+    img_array = np.asarray(resized_image, dtype=np.float32)
+    return np.expand_dims(img_array, axis=0)
