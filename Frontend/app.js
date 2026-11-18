@@ -1,5 +1,17 @@
 const API_ENDPOINT = 'https://crop-disease-detection-app-wqr0.onrender.com/api/v1/scan';
 
+async function fetchWithRetry(url, options, retries = 1) {
+    try {
+        return await fetch(url, options);
+    } catch (err) {
+        if (retries > 0) {
+            await new Promise(res => setTimeout(res, 800));
+            return await fetch(url, options);
+        }
+        throw err;
+    }
+}
+
 let stream = null;
 let currentBlob = null;
 let currentObjectUrl = null;
@@ -175,7 +187,7 @@ async function runScan() {
     formData.append('file', currentBlob, 'capture.jpg');
 
     try {
-        const response = await fetch(API_ENDPOINT, {
+        const response = await fetchWithRetry(API_ENDPOINT, {
             method: 'POST',
             body: formData
         });

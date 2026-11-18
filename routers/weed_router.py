@@ -1,19 +1,20 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, File, UploadFile, HTTPException
 from services.inference import run_diagnosis_pipeline
 
 router = APIRouter()
 
-@router.post("/api/v1/scan")
-async def predict_plant(file: UploadFile = File(...)):
+@router.post("/scan")
+def scan_image(file: UploadFile = File(...)):
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
+    
     try:
-        contents = await file.read()
-        if not contents:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-            
-        result = run_diagnosis_pipeline(contents)
+        image_bytes = file.file.read()
+        result = run_diagnosis_pipeline(image_bytes)
         return result
-
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Pipeline error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
+    finally:
+        file.file.close()
